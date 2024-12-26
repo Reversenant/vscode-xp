@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as fse from 'fs-extra';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import yaml from 'yaml';
 
 import { DialogHelper } from '../../../helpers/dialogHelper';
 import { FileSystemHelper } from '../../../helpers/fileSystemHelper';
@@ -16,7 +17,6 @@ import { UserSettingsManager } from '../../../models/content/userSettingsManager
 import { ViewCommand } from '../../../models/command/command';
 import { Log } from '../../../extension';
 import { JsHelper } from '../../../helpers/jsHelper';
-
 
 export class PackKbCommand extends ViewCommand {
 	constructor(private config: Configuration, private selectedPackage : ContentTreeBaseItem, private unpackKbFilePath : string) {
@@ -108,6 +108,19 @@ export class PackKbCommand extends ViewCommand {
 				const originsDstDirPath = path.join(originsDirPath, PackKbCommand.ORIGIN_FILENAME);
 				await fs.promises.writeFile(originsDstDirPath, originString);
 
+				// Определение пути к папке rules_filters в репозитории
+				const rulesFiltersRepoPath = path.join(path.dirname(path.dirname(packageDirPath)), 'common', 'rules_filters');
+				
+				// Создаем common/rules_filters во временной папке
+				const commonRulesFiltersPath = path.join(tmpPackageDirectoryPath, 'common', 'rules_filters');
+				await fs.promises.mkdir(commonRulesFiltersPath, { recursive: true });
+
+				// Копируем содержимое common/rules_filters во временную папку
+				await fse.copy(rulesFiltersRepoPath, commonRulesFiltersPath);
+
+				// Поиск и удаление папок с метафайлом, содержащим системные идентификаторы
+				await this.removeFolders(commonRulesFiltersPath);
+
 				// Типовая команда выглядит так:
 				// dotnet kbpack.dll pack -s "c:\tmp\pack" -o "c:\tmp\pack\Esc.kb"
 				Log.info("TmpPackageDirectoryPath: ", tmpPackageDirectoryPath);
@@ -137,6 +150,55 @@ export class PackKbCommand extends ViewCommand {
 				ExceptionHelper.show(error, "Внутренняя ошибка расширения");
 			}
 		});
+	}
+
+	// Принимает путь ко временной папке common/rules_filters
+	private async removeFolders(targetFolder: string): Promise<void> {
+		try {
+			const stats = await fs.promises.stat(targetFolder);
+		
+			// Если путь существует и это директория
+			if (stats.isDirectory()) {
+				// Список всех файлов и папок в директории
+				const entries = await fs.promises.readdir(targetFolder, { withFileTypes: true });
+	
+				for (const entry of entries) {
+					// Создаем полный путь к текущему элементу
+					const entryPath = path.join(targetFolder, entry.name);
+	
+					// Если это директория, проверяем ее на наличие metainfo
+					if (entry.isDirectory()) {
+						// Формируем путь к файлу metainfo.yaml в текущей директории
+						const metainfoPath = path.join(entryPath, "metainfo.yaml");
+	
+						try {
+							const metainfoStats = await fs.promises.stat(metainfoPath);
+	
+							// Если файл metainfo существует - считываем содержимое файла
+							if (metainfoStats.isFile()) {
+								const content = await fs.promises.readFile(metainfoPath, "utf-8");
+								// Если содержимое файла содержит строку "ObjectId: PT", удаляем папку
+								if (content.includes("ObjectId: PT")) {
+									Log.info("Удаление папки: ${entryPath}");
+									await fse.remove(entryPath);
+								}
+							}
+						} catch (err) {
+							// Если файл metainfo.yaml не существует, игнорируем ошибку ENOENT
+							if (err.code !== "ENOENT") {
+								Log.error("Ошибка при чтении ${metainfoPath}: ${err}");
+							}
+						}
+	
+						// Рекурсивно проверяем подпапки
+						await this.removeFolders(entryPath);
+					}
+				}
+			}
+		} catch (error) {
+			// Логируем ошибку, если произошла ошибка при обработке пути
+			Log.error("Ошибка при обработке пути ${targetFolder}:", error);
+		}
 	}
 
 	public static ORIGIN_FILENAME = "origins.json";
